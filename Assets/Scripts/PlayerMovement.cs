@@ -3,54 +3,63 @@ using UnityEngine.InputSystem;
 
 public class PlayerMovement : MonoBehaviour
 {
-    [Header("Sensitivity")]
-	[SerializeField][Range(1, 20)] private float xSensitivity = 10f;
-	[SerializeField][Range(1, 20)] private float ySensitivity = 10f;
-    
+	private CharacterController controller;
+	private CapsuleCollider capsuleCollider;
+	private CameraController cameraController;
 
-	private Rigidbody rigidbody;
-    private CapsuleCollider capsuleCollider;
-
-    private CameraController cameraController;
-
-    private InputAction moveAction;
-    private InputAction lookAction;
-    private InputAction jumpAction;
+	private InputAction moveAction;
+	private InputAction lookAction;
+	private InputAction jumpAction;
 	private InputAction sprintAction;
 	private InputAction crouchAction;
 
+	[Header("Look Sensitivity")]
+	[SerializeField][Range(1, 20)] private float xSensitivity = 10f;
+	[SerializeField][Range(1, 20)] private float ySensitivity = 10f;
+    
     [Header("Physics")]
     [SerializeField][Range(1f, 20f)] private float sprintSpeed = 8f;
 	[SerializeField][Range(1f, 20f)] private float walkSpeed = 6f;
 	[SerializeField][Range(1f, 20f)] private float crouchedSpeed = 4f;
-	[SerializeField][Range(1, 10)] private float jumpStrength = 5f;
-    [SerializeField] private float groundJumpBuffer = 0.1f;
-    [SerializeField] private AnimationCurve accelerationCurve;
-    [SerializeField] private LayerMask groundMask;
-	private bool isGrounded;
 
-    private Vector3 lastMove;
-    private Vector3 lastNonzeroMoveDirection;
-    private bool frontCastResult;
-    private bool backCastResult;
+    [SerializeField][Tooltip("how much time after player leaves ground can they press jump and have it work")]
+    private float groundJumpBuffer = 0.1f; 
+	[SerializeField][Tooltip("how much time before player lands can they press jump and have it work")]
+    private float airJumpBuffer = 0.2f;  
+
+	[SerializeField] private AnimationCurve jumpAccelerationCurve;
+    [SerializeField] private AnimationCurve fallAccelerationCurve;
+    [SerializeField] private LayerMask groundMask;
+
+    // Current Position State
+	private bool isGrounded;
+    private Vector3 velocity;
+
+    // Current Jump State
+	private float bufferedJumpPressTime = -1f;
+    private float leftGroundTime = -1f;
+    private bool leftGroundViaJump = false;
+    private bool jumpHeld = false;
+
+    // Unused for now
+	private Vector3 lastNonzeroMoveDirection;
+	private bool frontCastResult;
+	private bool backCastResult;
 	private bool leftCastResult;
 	private bool rightCastResult;
 
-	private float bufferedJumpPressTime = -1f;
-    private float leftGroundTime = -1f;
-
-    private bool canJump
+	private bool canJump
     {
         get
         {
-            return isGrounded || (Time.time - leftGroundTime < groundJumpBuffer);
+            return isGrounded || ((Time.time - leftGroundTime < groundJumpBuffer) && !leftGroundViaJump);
         }
     }
 
 	void Start()
     {
         cameraController = GetComponentInChildren<CameraController>();
-        rigidbody = GetComponent<Rigidbody>();
+        controller = GetComponent<CharacterController>();
         capsuleCollider = GetComponent<CapsuleCollider>();
         moveAction = InputSystem.actions.FindAction("Move");
         lookAction = InputSystem.actions.FindAction("Look");
@@ -61,14 +70,19 @@ public class PlayerMovement : MonoBehaviour
         lastNonzeroMoveDirection = Vector3.forward;
 	}
 
-    // Update is called once per frame
-    void Update()
+	private void Update()
+	{
+		
+	}
+
+	// Update is called once per frame
+	void FixedUpdate()
     {
         Vector2 lookValue = lookAction.ReadValue<Vector2>();
-        this.transform.rotation *= Quaternion.Euler(0, lookValue.x * xSensitivity * Time.deltaTime, 0);
-        this.cameraController.UpdateRotation(lookValue.y * ySensitivity * Time.deltaTime);
+        this.transform.rotation *= Quaternion.Euler(0, lookValue.x * xSensitivity * Time.fixedDeltaTime, 0);
+        this.cameraController.UpdateRotation(lookValue.y * ySensitivity * Time.fixedDeltaTime);
 
-        Vector2 moveValue = moveAction.ReadValue<Vector2>() * Time.deltaTime * 100f;
+        Vector2 moveValue = moveAction.ReadValue<Vector2>() * Time.fixedDeltaTime;
         if (sprintAction.IsPressed())
         {
             moveValue *= sprintSpeed;
@@ -82,82 +96,98 @@ public class PlayerMovement : MonoBehaviour
             moveValue *= walkSpeed;
         }
 
+
         Vector3 xz = this.transform.forward * moveValue.y + this.transform.right * moveValue.x;
         if (xz.sqrMagnitude > 0.1f)
         {
             lastNonzeroMoveDirection = xz;
         }
 
-		lastMove = new Vector3(xz.x, rigidbody.linearVelocity.y, xz.z);
-        rigidbody.linearVelocity = lastMove;
+		bool wasGrounded = isGrounded;
+        GetRaycastResults();
+        if (!isGrounded)
+        {
+            if (wasGrounded)
+            {
+				leftGroundTime = Time.time - Time.fixedDeltaTime;
+			}
+			ApplyVerticalVelocity();
+        }
+        else {
+            velocity.y = 0;
+            if (!wasGrounded)
+			{
+				leftGroundTime = -1f;
+                leftGroundViaJump = false;
+				if (Time.time - bufferedJumpPressTime < airJumpBuffer) {
+				    StartJump();
+                }
+			}
+		}
 
-
-		if (jumpAction.WasPressedThisFrame())
+        var jumpPressed = jumpAction.IsPressed();
+		if (jumpPressed && !jumpHeld)
         {
             if (canJump)
             {
-                Jump();
+				StartJump();
             }
             else
             {
                 bufferedJumpPressTime = Time.time;
             }
 		}
-    }
-
-	private void FixedUpdate()
-	{
-		bool wasGrounded = isGrounded;
-        getRaycastResults();
-		if (!isGrounded)
-        {
-			var lv = rigidbody.linearVelocity;
-            if (lv.y > -50f)
-            {
-				rigidbody.AddForce(Vector3.down * accelerationCurve.Evaluate(Time.time - leftGroundTime), ForceMode.Acceleration);
-            }
-
-            if (frontCastResult ^ backCastResult ^ leftCastResult ^ rightCastResult)
-            {
-				rigidbody.AddForce(Vector3.down * 20f, ForceMode.Acceleration);
-			}
-
-            if (wasGrounded)
-            {
-				leftGroundTime = Time.time;
-            }
-        }
-        else if (!wasGrounded && Time.time - bufferedJumpPressTime < 0.2f)
-        {
-            Jump();
-        }
+        jumpHeld = jumpPressed;
+		velocity = new Vector3(xz.x, velocity.y, xz.z);
+		controller.Move(velocity);
 	}
 
-    private void Jump()
+    private void StartJump() {
+        leftGroundViaJump = true;
+        leftGroundTime = Time.time;
+        velocity.y = jumpAccelerationCurve.Evaluate(0) * Time.fixedDeltaTime; //initial boost
+	}
+    private void ApplyVerticalVelocity()
     {
-        var lv = rigidbody.linearVelocity;
-		rigidbody.linearVelocity = new Vector3(lv.x, 0, lv.z);
-		rigidbody.AddForce(Vector3.up * jumpStrength, ForceMode.VelocityChange);
+        float jTime = Mathf.Clamp01(Time.time - leftGroundTime);
+        float v = 0f;
+        if (leftGroundViaJump && jumpHeld)
+        {
+            v = jumpAccelerationCurve.Evaluate(jTime);
+		}
+        else
+        {
+            v = fallAccelerationCurve.Evaluate(jTime);
+		}
+        velocity.y += v * Time.fixedDeltaTime;
 	}
 
-    private void getRaycastResults()
+    private void GetRaycastResults()
     {
-		var ray = Vector3.down * this.transform.lossyScale.y * capsuleCollider.height * 0.51f;
-		isGrounded = Physics.Linecast(this.transform.position, this.transform.position + ray, groundMask);
 
-		var frontBackOffset = new Vector3(lastNonzeroMoveDirection.x, 0, lastNonzeroMoveDirection.z).normalized * this.transform.lossyScale.x * capsuleCollider.radius * 0.95f;
-        var leftRightOffset = Quaternion.Euler(0, 90, 0) * frontBackOffset;
-		frontCastResult =   Physics.Linecast(this.transform.position + frontBackOffset, this.transform.position + frontBackOffset + ray, groundMask);
-		backCastResult =    Physics.Linecast(this.transform.position - frontBackOffset, this.transform.position - frontBackOffset + ray, groundMask);
-		rightCastResult =    Physics.Linecast(this.transform.position + leftRightOffset, this.transform.position + leftRightOffset + ray, groundMask);
-		leftCastResult =   Physics.Linecast(this.transform.position - leftRightOffset, this.transform.position - leftRightOffset + ray, groundMask);
+        var radius = this.transform.lossyScale.x * controller.radius;
+		isGrounded = Physics.SphereCast(this.transform.position,
+            radius,
+            Vector3.down,
+            out RaycastHit rayInfo,
+			this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f) - radius,
+            groundMask);
+
+		// var ray = Vector3.down * this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f);
+        // isGrounded = Physics.Linecast(this.transform.position, this.transform.position + ray, groundMask);
+		//var frontBackOffset = new Vector3(lastNonzeroMoveDirection.x, 0, lastNonzeroMoveDirection.z).normalized * this.transform.lossyScale.x * controller.radius * 0.95f;
+        //var leftRightOffset = Quaternion.Euler(0, 90, 0) * frontBackOffset;
+		//frontCastResult = Physics.Linecast(this.transform.position + frontBackOffset, this.transform.position + frontBackOffset + ray, groundMask);
+		//backCastResult = Physics.Linecast(this.transform.position - frontBackOffset, this.transform.position - frontBackOffset + ray, groundMask);
+		//rightCastResult = Physics.Linecast(this.transform.position + leftRightOffset, this.transform.position + leftRightOffset + ray, groundMask);
+		//leftCastResult = Physics.Linecast(this.transform.position - leftRightOffset, this.transform.position - leftRightOffset + ray, groundMask);
 
 #if UNITY_EDITOR
-        Debug.DrawLine(transform.position, this.transform.position + ray, isGrounded ? Color.green : Color.red, 0.1f);
-		Debug.DrawLine(this.transform.position + frontBackOffset, this.transform.position + frontBackOffset + ray, frontCastResult ? Color.green : Color.red, 0.1f);
-		Debug.DrawLine(this.transform.position - frontBackOffset, this.transform.position - frontBackOffset + ray, backCastResult ? Color.green : Color.red, 0.1f);
-		Debug.DrawLine(this.transform.position + leftRightOffset, this.transform.position + leftRightOffset + ray, rightCastResult ? Color.green : Color.red, 0.1f);
-		Debug.DrawLine(this.transform.position - leftRightOffset, this.transform.position - leftRightOffset + ray, leftCastResult ? Color.green : Color.red, 0.1f);
+  //      Debug.DrawLine(transform.position, this.transform.position + ray, isGrounded ? Color.green : Color.red, 0.1f);
+		//Debug.DrawLine(this.transform.position + frontBackOffset, this.transform.position + frontBackOffset + ray, frontCastResult ? Color.green : Color.red, 0.1f);
+		//Debug.DrawLine(this.transform.position - frontBackOffset, this.transform.position - frontBackOffset + ray, backCastResult ? Color.green : Color.red, 0.1f);
+		//Debug.DrawLine(this.transform.position + leftRightOffset, this.transform.position + leftRightOffset + ray, rightCastResult ? Color.green : Color.red, 0.1f);
+		//Debug.DrawLine(this.transform.position - leftRightOffset, this.transform.position - leftRightOffset + ray, leftCastResult ? Color.green : Color.red, 0.1f);
 #endif
 	}
 }
