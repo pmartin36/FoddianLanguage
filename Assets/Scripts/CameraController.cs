@@ -12,10 +12,17 @@ public class CameraController : MonoBehaviour
         Cursor.visible = false;
     }
 
-    public void UpdateRotation(float v)
+    public void UpdateRotation(float x)
     {
         Vector3 r = this.transform.rotation.eulerAngles;
-        xRotation = Mathf.Clamp(xRotation - v, -90f, 90f);
+        xRotation = Mathf.Clamp(xRotation - x, -90f, 90f);
 		this.transform.rotation = Quaternion.Euler(xRotation, r.y, r.z);
+    }
+
+    public void Flip()
+    {
+		Vector3 r = this.transform.rotation.eulerAngles;
+		this.transform.rotation = Quaternion.Euler(xRotation, r.y, r.z + 180);
+        //UpdateRotation(-xRotation);
     }
 }

@@ -1,3 +1,4 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -33,7 +34,8 @@ public class PlayerMovement : MonoBehaviour
 
     // Current Position State
 	private bool isGrounded;
-    private Vector3 velocity;
+    private Vector3 _velocity;
+    public Vector3 velocity { get => _velocity; }
 
     // Current Jump State
 	private float bufferedJumpPressTime = -1f;
@@ -48,12 +50,17 @@ public class PlayerMovement : MonoBehaviour
 	private bool leftCastResult;
 	private bool rightCastResult;
 
+    // Gravity
+    private Quaternion gravityRotation = Quaternion.identity;
+    private Vector3 gravityDirection = Vector3.down;
+    private float gravityFlipTime = -1f;
+
+    // Misc Getters
+    public float Height { get => this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f); }
+
 	private bool canJump
     {
-        get
-        {
-            return isGrounded || ((Time.time - leftGroundTime < groundJumpBuffer) && !leftGroundViaJump);
-        }
+        get => isGrounded || ((Time.time - leftGroundTime < groundJumpBuffer) && !leftGroundViaJump);
     }
 
 	void Start()
@@ -80,7 +87,10 @@ public class PlayerMovement : MonoBehaviour
     {
         Vector2 lookValue = lookAction.ReadValue<Vector2>();
         this.transform.rotation *= Quaternion.Euler(0, lookValue.x * xSensitivity * Time.fixedDeltaTime, 0);
-        this.cameraController.UpdateRotation(lookValue.y * ySensitivity * Time.fixedDeltaTime);
+
+        var camRotation = lookValue.y * ySensitivity * Time.fixedDeltaTime;
+        // camRotation *= -gravityDirection.y; // this is a a hack, it only handles gravity changes in y direction
+		this.cameraController.UpdateRotation(camRotation);
 
         Vector2 moveValue = moveAction.ReadValue<Vector2>() * Time.fixedDeltaTime;
         if (sprintAction.IsPressed())
@@ -114,7 +124,7 @@ public class PlayerMovement : MonoBehaviour
 			ApplyVerticalVelocity();
         }
         else {
-            velocity.y = 0;
+            _velocity.y = 0;
             if (!wasGrounded)
 			{
 				leftGroundTime = -1f;
@@ -128,6 +138,7 @@ public class PlayerMovement : MonoBehaviour
         var jumpPressed = jumpAction.IsPressed();
 		if (jumpPressed && !jumpHeld)
         {
+            Debug.Log("canjump" + canJump);
             if (canJump)
             {
 				StartJump();
@@ -138,14 +149,19 @@ public class PlayerMovement : MonoBehaviour
             }
 		}
         jumpHeld = jumpPressed;
-		velocity = new Vector3(xz.x, velocity.y, xz.z);
-		controller.Move(velocity);
+		_velocity = new Vector3(xz.x, _velocity.y, xz.z);
+		controller.Move(_velocity);
 	}
 
     private void StartJump() {
         leftGroundViaJump = true;
         leftGroundTime = Time.time;
-        velocity.y = jumpAccelerationCurve.Evaluate(0) * Time.fixedDeltaTime; //initial boost
+
+        // clear velocity in gravity direction
+        _velocity -= Vector3.Project(velocity, gravityDirection);
+
+        // add initial jump velocity
+        _velocity -= gravityDirection * jumpAccelerationCurve.Evaluate(0) * Time.fixedDeltaTime; //initial boost
 	}
     private void ApplyVerticalVelocity()
     {
@@ -159,7 +175,7 @@ public class PlayerMovement : MonoBehaviour
         {
             v = fallAccelerationCurve.Evaluate(jTime);
 		}
-        velocity.y += v * Time.fixedDeltaTime;
+        _velocity -= gravityDirection * v * Time.fixedDeltaTime;
 	}
 
     private void GetRaycastResults()
@@ -168,9 +184,9 @@ public class PlayerMovement : MonoBehaviour
         var radius = this.transform.lossyScale.x * controller.radius;
 		isGrounded = Physics.SphereCast(this.transform.position,
             radius,
-            Vector3.down,
+            gravityDirection,
             out RaycastHit rayInfo,
-			this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f) - radius,
+			Height - radius,
             groundMask);
 
 		// var ray = Vector3.down * this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f);
@@ -190,4 +206,20 @@ public class PlayerMovement : MonoBehaviour
 		//Debug.DrawLine(this.transform.position - leftRightOffset, this.transform.position - leftRightOffset + ray, leftCastResult ? Color.green : Color.red, 0.1f);
 #endif
 	}
+
+    public bool canInvertGravity()
+    {
+        return !isGrounded && Vector3.Dot(velocity, gravityDirection) > 0.2f && Time.time - gravityFlipTime > 2f;
+    }
+
+    public void UpdateGravityDirection(Vector3 dir)
+    {
+        Debug.Log("Updating gravity to: " + dir.ToString());
+        gravityRotation = Quaternion.FromToRotation(Vector3.down, dir);
+        gravityDirection = Vector3.Normalize(dir);
+        gravityFlipTime = Time.time;
+
+        this.transform.rotation = gravityRotation;
+        // this.cameraController.Flip();
+    }
 }
