@@ -5,12 +5,12 @@ using UnityEngine.InputSystem;
 public class PlayerMovement : MonoBehaviour
 {
 	private CharacterController controller;
-	private CapsuleCollider capsuleCollider;
 	private CameraController cameraController;
 
 	private InputAction moveAction;
 	private InputAction lookAction;
 	private InputAction jumpAction;
+    private InputAction torchAction;
 	private InputAction sprintAction;
 	private InputAction crouchAction;
 
@@ -34,9 +34,9 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private LayerMask groundMask;
 
     // Current Position State
-	private bool isGrounded;
-    private Vector3 _velocity;
-    public Vector3 velocity { get => _velocity; }
+	public bool IsGrounded { get; private set; }
+    public Vector3 velocity { get; private set; }
+    public Vector3 groundVelocity { get; private set; }
 
     // Current Jump State
 	private float bufferedJumpPressTime = -1f;
@@ -52,13 +52,17 @@ public class PlayerMovement : MonoBehaviour
 	private bool rightCastResult;
 
     // Gravity
+    public Vector3 GravityDirection { get; private set; } = Vector3.down;
     private Quaternion gravityRotation = Quaternion.identity;
-    private Vector3 gravityDirection = Vector3.down;
     private float gravityFlipTime = -1f;
+    private Vector3 gravityOrthogonals;
 
     // Crouch
     private bool isCrouched;
     private bool isAnimatingCrouch;
+
+    // Torch
+    private Torch torch;
 
     // Misc Getters
     private float standingRaycastHeight;
@@ -67,19 +71,22 @@ public class PlayerMovement : MonoBehaviour
 
 	private bool canJump
     {
-        get => isGrounded || ((Time.time - leftGroundTime < groundJumpBuffer) && !leftGroundViaJump);
+        get => IsGrounded || ((Time.time - leftGroundTime < groundJumpBuffer) && !leftGroundViaJump);
     }
 
 	void Start()
     {
         cameraController = GetComponentInChildren<CameraController>();
         controller = GetComponent<CharacterController>();
-        capsuleCollider = GetComponent<CapsuleCollider>();
+        torch = GetComponentInChildren<Torch>();
+
+        // probably all these actions should go into an input manager and send them to whatever is needed isntead
         moveAction = InputSystem.actions.FindAction("Move");
         lookAction = InputSystem.actions.FindAction("Look");
 		jumpAction = InputSystem.actions.FindAction("Jump");
         crouchAction = InputSystem.actions.FindAction("Crouch");
         sprintAction = InputSystem.actions.FindAction("Sprint");
+        torchAction = InputSystem.actions.FindAction("Torch");
 
         lastNonzeroMoveDirection = Vector3.forward;
         standingRaycastHeight = Height;
@@ -87,7 +94,7 @@ public class PlayerMovement : MonoBehaviour
 
 	private void Update()
 	{
-		
+        torch.PlayerUpdate(torchAction.IsPressed(), groundVelocity);
 	}
 
 	// Update is called once per frame
@@ -117,9 +124,13 @@ public class PlayerMovement : MonoBehaviour
         Vector2 moveValue = moveAction.ReadValue<Vector2>() * Time.fixedDeltaTime;
         if (isCrouched)
         {
-			moveValue *= crouchedSpeed;
-		}
-		else if (sprintAction.IsPressed())
+            moveValue *= crouchedSpeed;
+        }
+        else if (torch.IsExtended)
+        {
+            moveValue *= walkSpeed;
+        }
+        else if (sprintAction.IsPressed())
         {
             moveValue *= sprintSpeed;
         }
@@ -129,15 +140,15 @@ public class PlayerMovement : MonoBehaviour
         }
 
 
-        Vector3 xz = this.transform.forward * moveValue.y + this.transform.right * moveValue.x;
-        if (xz.sqrMagnitude > 0.1f)
+        groundVelocity = this.transform.forward * moveValue.y + this.transform.right * moveValue.x;
+        if (groundVelocity.sqrMagnitude > 0.1f)
         {
-            lastNonzeroMoveDirection = xz;
+            lastNonzeroMoveDirection = groundVelocity;
         }
 
-		bool wasGrounded = isGrounded;
+		bool wasGrounded = IsGrounded;
         GetRaycastResults();
-        if (!isGrounded)
+        if (!IsGrounded)
         {
             if (wasGrounded)
             {
@@ -146,7 +157,7 @@ public class PlayerMovement : MonoBehaviour
 			ApplyVerticalVelocity();
         }
         else {
-            _velocity.y = 0;
+            velocity.Scale(gravityOrthogonals);
             if (!wasGrounded)
 			{
 				leftGroundTime = -1f;
@@ -160,7 +171,6 @@ public class PlayerMovement : MonoBehaviour
         var jumpPressed = jumpAction.IsPressed();
 		if (jumpPressed && !jumpHeld)
         {
-            Debug.Log("canjump" + canJump);
             if (canJump)
             {
 				StartJump();
@@ -171,19 +181,19 @@ public class PlayerMovement : MonoBehaviour
             }
 		}
         jumpHeld = jumpPressed;
-		_velocity = new Vector3(xz.x, _velocity.y, xz.z);
-		controller.Move(_velocity);
+		velocity = new Vector3(groundVelocity.x, velocity.y, groundVelocity.z);
+		controller.Move(velocity);
 	}
 
-    private void StartJump() {
+	private void StartJump() {
         leftGroundViaJump = true;
         leftGroundTime = Time.time;
 
         // clear velocity in gravity direction
-        _velocity -= Vector3.Project(velocity, gravityDirection);
+        velocity -= Vector3.Project(velocity, GravityDirection);
 
         // add initial jump velocity
-        _velocity -= gravityDirection * jumpAccelerationCurve.Evaluate(0) * Time.fixedDeltaTime; //initial boost
+        velocity -= GravityDirection * jumpAccelerationCurve.Evaluate(0) * Time.fixedDeltaTime; //initial boost
 	}
     private void ApplyVerticalVelocity()
     {
@@ -197,8 +207,8 @@ public class PlayerMovement : MonoBehaviour
         {
             v = fallAccelerationCurve.Evaluate(jTime);
 		}
-        var tempv = _velocity - gravityDirection * v * Time.fixedDeltaTime;
-        _velocity = new Vector3(
+        var tempv = velocity - GravityDirection * v * Time.fixedDeltaTime;
+        velocity = new Vector3(
             Mathf.Clamp(tempv.x, -maxDirectionalVelocity, maxDirectionalVelocity),
             Mathf.Clamp(tempv.y, -maxDirectionalVelocity, maxDirectionalVelocity),
             Mathf.Clamp(tempv.z, -maxDirectionalVelocity, maxDirectionalVelocity)
@@ -208,9 +218,9 @@ public class PlayerMovement : MonoBehaviour
 
     private void GetRaycastResults()
     {
-		isGrounded = Physics.SphereCast(this.transform.position,
+		IsGrounded = Physics.SphereCast(this.transform.position,
             Radius,
-            gravityDirection,
+            GravityDirection,
             out RaycastHit rayInfo,
 			Height - Radius,
             groundMask);
@@ -235,7 +245,7 @@ public class PlayerMovement : MonoBehaviour
 
     public bool canInvertGravity()
     {
-        return !isGrounded && Vector3.Dot(velocity, gravityDirection) > 0.2f && Time.time - gravityFlipTime > 2f;
+        return !IsGrounded && Vector3.Dot(velocity, GravityDirection) > 0.2f && Time.time - gravityFlipTime > 2f;
     }
 
     public void UpdateGravityDirection(Vector3 dir)
@@ -243,7 +253,12 @@ public class PlayerMovement : MonoBehaviour
         Debug.Log("Updating gravity to: " + dir.ToString());
         var oldGrav = gravityRotation;
         gravityRotation = Quaternion.FromToRotation(Vector3.down, dir);
-        gravityDirection = Vector3.Normalize(dir);
+        GravityDirection = Vector3.Normalize(dir);
+        gravityOrthogonals = new Vector3(
+            1 - Mathf.Abs(GravityDirection.x),
+            1 - Mathf.Abs(GravityDirection.y),
+            1 - Mathf.Abs(GravityDirection.z)
+        );
         gravityFlipTime = Time.time;
 
         this.transform.rotation *= (gravityRotation * Quaternion.Inverse(oldGrav))
@@ -264,7 +279,7 @@ public class PlayerMovement : MonoBehaviour
     {
 		var hit = Physics.SphereCast(this.transform.position,
 			Radius,
-			-gravityDirection,
+			-GravityDirection,
 			out RaycastHit rayInfo,
 			standingRaycastHeight - Radius + 1f, // 1f is extra buffer required - will sort with design
 			groundMask);
@@ -295,7 +310,7 @@ public class PlayerMovement : MonoBehaviour
                 isAnimatingCrouch = false;
                 controller.height = Mathf.Clamp(controller.height, 1f, 2f);
             }
-            controller.Move(gravityDirection * (startingHeight - controller.height) * 0.5f);
+            controller.Move(GravityDirection * (startingHeight - controller.height) * 0.5f);
             yield return null;
         }
     }
