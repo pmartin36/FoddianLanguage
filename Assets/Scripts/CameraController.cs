@@ -14,15 +14,18 @@ public class CameraController : MonoBehaviour
 
     public void UpdateRotation(float x)
     {
-        Vector3 r = this.transform.rotation.eulerAngles;
-        xRotation = Mathf.Clamp(xRotation - x, -90f, 90f);
-		this.transform.rotation = Quaternion.Euler(xRotation, r.y, r.z);
+        SetRotation(Mathf.Clamp(xRotation - x, -90f, 90f));
     }
 
-    public void Flip()
+    public void SetRotation(float x)
     {
-		Vector3 r = this.transform.rotation.eulerAngles;
-		this.transform.rotation = Quaternion.Euler(xRotation, r.y, r.z + 180);
-        //UpdateRotation(-xRotation);
+        xRotation = x;
+        this.transform.localRotation = Quaternion.Euler(xRotation, 0, 0); 
+    }
+
+	public void Flip()
+    {
+        // Keep same rotation as before going through the portal
+        SetRotation(-xRotation);
     }
 }

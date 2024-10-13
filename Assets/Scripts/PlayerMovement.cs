@@ -22,6 +22,7 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField][Range(1f, 20f)] private float sprintSpeed = 8f;
 	[SerializeField][Range(1f, 20f)] private float walkSpeed = 6f;
 	[SerializeField][Range(1f, 20f)] private float crouchedSpeed = 4f;
+    [SerializeField][Range(0.1f, 2f)][Tooltip("Maximum velocity in any single direction")] private float maxDirectionalVelocity = 0.8f;
 
     [SerializeField][Tooltip("how much time after player leaves ground can they press jump and have it work")]
     private float groundJumpBuffer = 0.1f; 
@@ -55,8 +56,14 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 gravityDirection = Vector3.down;
     private float gravityFlipTime = -1f;
 
+    // Crouch
+    private bool isCrouched;
+    private bool isAnimatingCrouch;
+
     // Misc Getters
+    private float standingRaycastHeight;
     public float Height { get => this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f); }
+    public float Radius { get => this.transform.lossyScale.x * controller.radius; }
 
 	private bool canJump
     {
@@ -75,6 +82,7 @@ public class PlayerMovement : MonoBehaviour
         sprintAction = InputSystem.actions.FindAction("Sprint");
 
         lastNonzeroMoveDirection = Vector3.forward;
+        standingRaycastHeight = Height;
 	}
 
 	private void Update()
@@ -89,17 +97,31 @@ public class PlayerMovement : MonoBehaviour
         this.transform.rotation *= Quaternion.Euler(0, lookValue.x * xSensitivity * Time.fixedDeltaTime, 0);
 
         var camRotation = lookValue.y * ySensitivity * Time.fixedDeltaTime;
-        // camRotation *= -gravityDirection.y; // this is a a hack, it only handles gravity changes in y direction
 		this.cameraController.UpdateRotation(camRotation);
 
+        // check crouched
+        if (isCrouched)
+        {
+            // try uncrouch
+            if (!crouchAction.IsPressed())
+            {
+                TryUncrouch();
+            }
+        }
+        else if (!isCrouched && crouchAction.IsPressed())
+        {
+            SetCrouched();
+        }
+
+
         Vector2 moveValue = moveAction.ReadValue<Vector2>() * Time.fixedDeltaTime;
-        if (sprintAction.IsPressed())
+        if (isCrouched)
+        {
+			moveValue *= crouchedSpeed;
+		}
+		else if (sprintAction.IsPressed())
         {
             moveValue *= sprintSpeed;
-        }
-        else if (crouchAction.IsPressed())
-        {
-            moveValue *= crouchedSpeed;
         }
         else
         {
@@ -175,18 +197,22 @@ public class PlayerMovement : MonoBehaviour
         {
             v = fallAccelerationCurve.Evaluate(jTime);
 		}
-        _velocity -= gravityDirection * v * Time.fixedDeltaTime;
+        var tempv = _velocity - gravityDirection * v * Time.fixedDeltaTime;
+        _velocity = new Vector3(
+            Mathf.Clamp(tempv.x, -maxDirectionalVelocity, maxDirectionalVelocity),
+            Mathf.Clamp(tempv.y, -maxDirectionalVelocity, maxDirectionalVelocity),
+            Mathf.Clamp(tempv.z, -maxDirectionalVelocity, maxDirectionalVelocity)
+        );
+		Debug.Log(velocity.y);
 	}
 
     private void GetRaycastResults()
     {
-
-        var radius = this.transform.lossyScale.x * controller.radius;
 		isGrounded = Physics.SphereCast(this.transform.position,
-            radius,
+            Radius,
             gravityDirection,
             out RaycastHit rayInfo,
-			Height - radius,
+			Height - Radius,
             groundMask);
 
 		// var ray = Vector3.down * this.transform.lossyScale.y * (controller.height * 0.5f + controller.skinWidth + 0.01f);
@@ -215,11 +241,62 @@ public class PlayerMovement : MonoBehaviour
     public void UpdateGravityDirection(Vector3 dir)
     {
         Debug.Log("Updating gravity to: " + dir.ToString());
+        var oldGrav = gravityRotation;
         gravityRotation = Quaternion.FromToRotation(Vector3.down, dir);
         gravityDirection = Vector3.Normalize(dir);
         gravityFlipTime = Time.time;
 
-        this.transform.rotation = gravityRotation;
-        // this.cameraController.Flip();
+        this.transform.rotation *= (gravityRotation * Quaternion.Inverse(oldGrav))
+			 * Quaternion.Euler(0, 180, 0); // workaround - only works if up/down are the only directions we flip
+        this.cameraController.Flip();
+    }
+
+    private void SetCrouched()
+    {
+		isCrouched = true;
+		if (!isAnimatingCrouch)
+		{
+			StartCoroutine(TransitionCrouch());
+		}
+	}
+
+    private bool TryUncrouch()
+    {
+		var hit = Physics.SphereCast(this.transform.position,
+			Radius,
+			-gravityDirection,
+			out RaycastHit rayInfo,
+			standingRaycastHeight - Radius + 1f, // 1f is extra buffer required - will sort with design
+			groundMask);
+        if (hit)
+        {
+            return false;
+        }
+        isCrouched = false;
+        if (!isAnimatingCrouch)
+        {
+            StartCoroutine(TransitionCrouch());
+        }
+        return true;
+	}
+
+    IEnumerator TransitionCrouch()
+    {
+        isAnimatingCrouch = true;
+        while (isAnimatingCrouch)
+        {
+            var target = isCrouched ? 1f : 2f;
+            var dir = Mathf.Sign(target - controller.height);
+            var startingHeight = controller.height;
+            Debug.Log($"target: {target}, dir: {dir}");
+            controller.height += dir * Time.deltaTime * 10f;
+            if (dir > 0 && controller.height >= target || dir < 0 && controller.height <= target)
+            {
+                isAnimatingCrouch = false;
+                controller.height = Mathf.Clamp(controller.height, 1f, 2f);
+            }
+            controller.Move(gravityDirection * (startingHeight - controller.height) * 0.5f);
+            yield return null;
+        }
     }
 }
